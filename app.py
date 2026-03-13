@@ -17,12 +17,15 @@ from pathlib import Path
 # ── make sure the automl package is importable ────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 from automl import AutoML
-import os
-os.makedirs("./automl_output", exist_ok=True)
+
 # ── Gradio version compatibility check ───────────────────────────────────────
 import gradio as _gr_check
 _gr_version = tuple(int(x) for x in _gr_check.__version__.split(".")[:2])
+_is_gradio_4_plus = _gr_version[0] >= 4
+_is_gradio_6_plus = _gr_version[0] >= 6
 print(f"  Gradio version: {_gr_check.__version__}")
+# gr.File type param: needed in 3.x only
+_FILE_KWARGS = {} if _is_gradio_4_plus else {"type": "file"}
 
 # ── Global state ──────────────────────────────────────────────────────────────
 _state: dict = {
@@ -31,6 +34,31 @@ _state: dict = {
     "log_lines": [],
     "running":   False,
 }
+
+# ── File path compatibility helper (Gradio 3.x / 4.x / 5.x / 6.x) ──────────
+def _get_filepath(file):
+    """Handle gr.File output across ALL Gradio versions including 6.x."""
+    if file is None:
+        return None
+    # Gradio 6.x: returns plain string filepath directly
+    if isinstance(file, str):
+        return file
+    # Gradio 6.x: sometimes returns a list (multiple files)
+    if isinstance(file, list):
+        return file[0] if file else None
+    # Gradio 3.x early: returns dict
+    if isinstance(file, dict):
+        return file.get("name") or file.get("path") or file.get("tmp_path")
+    # Gradio 4.x / 5.x: UploadData with .path attribute
+    if hasattr(file, "path"):
+        return file.path
+    # Gradio 3.x late: object with .name
+    if hasattr(file, "name"):
+        return file.name
+    # Last resort
+    return str(file)
+
+
 
 PALETTE = {
     "bg":      "#0d1117",
@@ -84,10 +112,17 @@ def _ax_style(ax, title="", xlabel="", ylabel=""):
 def handle_upload(file):
     if file is None:
         return (gr.update(choices=[], value=None),
-                gr.update(value="No file uploaded."),
+                gr.update(value="<p style='color:#8b949e;'>Upload a CSV to see summary.</p>"),
                 gr.update(value=None))
     try:
-        df = pd.read_csv(file.name)
+        print(f"  [Upload] file type: {type(file)}, value: {repr(file)[:200]}")
+        filepath = _get_filepath(file)
+        print(f"  [Upload] resolved filepath: {filepath}")
+        if filepath is None:
+            return (gr.update(choices=[], value=None),
+                    gr.update(value="<p style='color:red'>Could not read file. Try uploading again.</p>"),
+                    gr.update(value=None))
+        df = pd.read_csv(filepath)
         _state["df"] = df
         cols = df.columns.tolist()
 
@@ -140,8 +175,11 @@ def handle_upload(file):
                 gr.update(value=combined),
                 gr.update(value=None))
     except Exception as e:
+        import traceback
+        err_detail = traceback.format_exc()
+        print(f"  [Upload Error] {err_detail}")
         return (gr.update(choices=[], value=None),
-                gr.update(value=f"<p style='color:red'>Error: {e}</p>"),
+                gr.update(value=f"<div style='color:#f85149;font-family:monospace;padding:12px;background:#161b22;border:1px solid #f85149;border-radius:6px;'><b>Error loading file:</b><br>{str(e)}<br><br><small>Check HF Space logs for details.</small></div>"),
                 gr.update(value=None))
 
 
@@ -468,7 +506,8 @@ def predict_on_file(file):
     if file is None:
         return (None, "<p style='color:red'>Upload a CSV to predict on.</p>")
     try:
-        new_df = pd.read_csv(file.name)
+        filepath = _get_filepath(file)
+        new_df = pd.read_csv(filepath)
         preds  = am.predict(new_df)
         new_df["prediction"] = preds
         out_path = "./automl_output/predictions.csv"
@@ -802,12 +841,12 @@ def build_app():
             # ══════════════════════════════════════════════════════════════
             # TAB 1 — Upload & Explore
             # ══════════════════════════════════════════════════════════════
-            with gr.Tab("  Upload & Explore"):
+            with gr.Tab("📂  Upload & Explore"):
                 gr.Markdown("### Upload your CSV dataset to get started")
 
                 with gr.Row():
                     with gr.Column(scale=1):
-                        upload_btn = gr.File(label="Drop CSV here", file_types=[".csv"])
+                        upload_btn = gr.File(label="📂 Drop CSV here (or click to browse)")
                         target_dd  = gr.Dropdown(label="Target Column", choices=[], interactive=True)
                         explore_btn = gr.Button("🔍 Analyze Selected Column", variant="secondary")
 
@@ -830,7 +869,7 @@ def build_app():
             # ══════════════════════════════════════════════════════════════
             # TAB 2 — Configure & Train
             # ══════════════════════════════════════════════════════════════
-            with gr.Tab("  Configure & Train"):
+            with gr.Tab("🚀  Configure & Train"):
                 gr.Markdown("### Training Configuration")
 
                 with gr.Row():
@@ -874,7 +913,7 @@ def build_app():
             # ══════════════════════════════════════════════════════════════
             # TAB 3 — Results & Metrics
             # ══════════════════════════════════════════════════════════════
-            with gr.Tab("  Results & Metrics"):
+            with gr.Tab("📊  Results & Metrics"):
                 gr.Markdown("### Best Model Performance")
                 results_btn = gr.Button("Load Results", variant="secondary")
 
@@ -896,7 +935,7 @@ def build_app():
             # ══════════════════════════════════════════════════════════════
             # TAB 4 — Feature Importance
             # ══════════════════════════════════════════════════════════════
-            with gr.Tab("  Feature Importance"):
+            with gr.Tab("🔍  Feature Importance"):
                 gr.Markdown("### SHAP / Model-Based Feature Importance")
                 with gr.Row():
                     top_k_slider = gr.Slider(5, 40, value=15, step=1, label="Top K Features")
@@ -918,11 +957,11 @@ def build_app():
             # ══════════════════════════════════════════════════════════════
             # TAB 5 — Predict
             # ══════════════════════════════════════════════════════════════
-            with gr.Tab("  Predict"):
+            with gr.Tab("🎯  Predict"):
                 gr.Markdown("### Batch Prediction (CSV file)")
                 with gr.Row():
                     with gr.Column():
-                        pred_file   = gr.File(label="Upload CSV for prediction", file_types=[".csv"])
+                        pred_file   = gr.File(label="Upload CSV for prediction")
                         pred_btn    = gr.Button("Run Prediction", variant="primary")
                     with gr.Column():
                         pred_result = gr.HTML()
@@ -958,7 +997,7 @@ def build_app():
             # ══════════════════════════════════════════════════════════════
             # TAB 6 — Dataset Analysis
             # ══════════════════════════════════════════════════════════════
-            with gr.Tab("  Dataset Analysis"):
+            with gr.Tab("🧬  Dataset Analysis"):
                 gr.Markdown("### Automated Dataset Visualizations")
                 analysis_btn = gr.Button("Generate Analysis Plots", variant="primary")
 
@@ -989,20 +1028,29 @@ def build_app():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# if __name__ == "__main__":
-    # print("\n" + "="*55)
-    # print("  AutoML Gradio Interface")
-    # print("  Install deps: pip install gradio pillow")
-    # print("  Then run:     python app.py")
-    # print("="*55 + "\n")
-    # app = build_app()
-    # app.launch(
-    #     server_name="0.0.0.0",
-    #     server_port=7860,
-    #     share=True,          # set True to get a public ngrok link
-    #     show_error=True,
-    #     inbrowser=True,
-    # )
 if __name__ == "__main__":
+    print("\n" + "="*55)
+    print("  AutoML Gradio Interface")
+    print(f"  Gradio version: {_gr_check.__version__}")
+    print("="*55 + "\n")
     app = build_app()
-    app.launch() 
+
+    # Detect if running on HF Spaces
+    import os
+    on_hf_spaces = os.environ.get("SPACE_ID") is not None
+
+    if on_hf_spaces:
+        # HF Spaces: minimal launch args
+        app.launch(ssr_mode=False)
+    else:
+        # Local: full args
+        launch_kwargs = dict(
+            server_name="0.0.0.0",
+            server_port=7860,
+            share=False,
+            show_error=True,
+        )
+        # ssr_mode only exists in Gradio 5+
+        if _gr_version[0] >= 5:
+            launch_kwargs["ssr_mode"] = False
+        app.launch(**launch_kwargs)
